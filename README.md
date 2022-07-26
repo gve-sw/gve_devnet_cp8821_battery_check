@@ -3,9 +3,9 @@
 This code repository contains a script to fetch the HTTP status page from Cisco 8821 IP Phones.
 
 This script will:
- - Take in a list of target IP addresses
+ - Take in a list of target IP addresses (Either a text list or CIDR range)
  - Query each IP & retrieve the HTTP status page
- - Parse HTML of each page & pull battery health/temperture info
+ - Parse HTML of each page & pull battery health/temperature info
  - Generate CSV reports for battery health
 
 ## Contacts
@@ -21,7 +21,7 @@ This script will:
 git clone <repo_url>
 ```
 
-**[Step 2] Install required dependancies:**
+**[Step 2] Install required dependencies:**
 
 While in the module directory:
 ```bash
@@ -37,7 +37,19 @@ The executable can then be distributed or installed without requiring a local Go
 
 ## Usage
 
-Create a text file with each IP address to check on a new line, for example:
+Run the script with **one** of the two following inputs:
+
+ - `-infile` Provide an input text file of IP addresses to scan
+ - `-cidr` Provide a CIDR range to scan
+
+The following are additional optional arguments to modify the behavior of the script:
+
+ - `-temp` Provide a temperature threshold for checking phone batteries, in Celsius. The default threshold is 50.0 C.
+ - `-timeout` Provide a HTTP timeout for trying to reach an IP phone, in seconds. Default is 10 seconds.
+ - `-v` Enable verbose logging, which will provide status on each IP phone as it is queried
+
+
+**Note:** If using `-infile`, create a text file with each IP address to check on a new line, for example:
 
 ```text
 10.10.10.10
@@ -45,13 +57,6 @@ Create a text file with each IP address to check on a new line, for example:
 30.30.30.30
 40.40.40.40
 ```
-
-Run the script with with the following arguments:
-
- - `-infile` (REQUIRED) Provide an input text file of IP addresses to scan
- - `-temp` (OPTIONAL) Provide a temperature threshold for checking phone batteries, in celsius. The default threshold is 50.0 C.
- - `-timeout` (OPTIONAL) Provide a HTTP timeout for trying to reach an IP phone, in seconds. Default is 10 seconds.
- - `-v` (OPTIONAL) Enable verbose logging, which will provide status on each IP phone as it is queried
 
 **Note:** By default the script will try to use a TLS connection, but will fallback to HTTP.
 

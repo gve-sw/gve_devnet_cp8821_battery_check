@@ -32,6 +32,7 @@ import (
 )
 
 var inputfile string
+var inputcidr string
 var chkTemp float64
 var timeout int
 var vlog bool
@@ -39,6 +40,8 @@ var good int
 var bad int
 var unreachable int
 var hightemp int
+var validAddr int
+var invalidAddr int
 
 const workers = 10
 
@@ -54,40 +57,78 @@ func main() {
 	timestamp := string(currentTime.Format("20060102-150405"))
 
 	// parse command line arguments
-	flag.StringVar(&inputfile, "infile", "", "Text list of IP addresses to check (required)")
+	flag.StringVar(&inputfile, "infile", "", "Text list of IP addresses to check")
+	flag.StringVar(&inputcidr, "cidr", "", "CIDR IP Subnet to scan")
 	flag.Float64Var(&chkTemp, "temp", 50, "High temperature threshold in C (default 50)")
 	flag.IntVar(&timeout, "timeout", 10, "Time to wait for response from remote IP Phone in seconds (default 10)")
 	flag.BoolVar(&vlog, "v", false, "Enable verbose logging")
 
 	flag.Usage = func() {
+		fmt.Println("This script will scan Cisco 8821 IP phones to check battery health & temperature.")
+		fmt.Println("Output is written to local CSV files labeled with date/time stamp & separated by status.")
+		fmt.Println("")
+		fmt.Println("Note: IP addresses to scan must be provided with either the -infile or -cidr option")
+		fmt.Println("")
 		fmt.Println("Usage:")
 		flag.PrintDefaults()
 	}
-	// Check that input file was provided - else print usage info
+	// Check that input file or CIDR range was provided
 	flag.Parse()
-	if inputfile == "" {
-		fmt.Println("Please provide an input file!")
-		flag.Usage()
+	if inputfile == "" && inputcidr == "" {
+		fmt.Println("Please provide an input file or CIDR range! Use --help for usage")
 		os.Exit(1)
 	}
 
-	// Open input file
-	infile, err := os.Open(inputfile)
-	if err != nil {
-		log.Fatal(err)
+	// Check that only one input was provided
+	if inputfile != "" && inputcidr != "" {
+		fmt.Println("Please provide only one input method! Use --help for usage")
+		os.Exit(1)
 	}
-	defer infile.Close()
 
-	// Count addresses in file:
-	fmt.Println("Validating input file...")
-	validAddr, invalidAddr := countLines(infile)
-	fmt.Println("Found " + strconv.Itoa(validAddr) + " addresses to check")
-	if invalidAddr >= 1 {
-		fmt.Println(strconv.Itoa(invalidAddr) + " adddreses are invalid & will not be checked.")
+	var ip_list []string
+	// If input file was provided, open & parse IP addresses
+	if inputfile != "" {
+		// Open input file
+		infile, err := os.Open(inputfile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer infile.Close()
+
+		// Count addresses in file:
+		fmt.Println("Validating input file...")
+		validAddr, invalidAddr = countLines(infile)
+		fmt.Println("Found " + strconv.Itoa(validAddr) + " addresses to check")
+		if invalidAddr >= 1 {
+			fmt.Println(strconv.Itoa(invalidAddr) + " addreses are invalid & will not be checked.")
+		}
+		// Reset to first line in file after reading during line count
+		infile.Seek(0, io.SeekStart)
+
+		scanner := bufio.NewScanner(infile)
+		for scanner.Scan() {
+
+			// Strip any whitespace from IP
+			ip := strings.TrimSpace(scanner.Text())
+			// Ensure IP is valid
+			if net.ParseIP(strings.Split(ip, ":")[0]) == nil {
+				if vlog {
+					fmt.Println("Invalid address: ", ip)
+				}
+				continue
+			}
+			ip_list = append(ip_list, ip)
+
+		}
 	}
-	// Reset to first line in file after reading during line count
-	infile.Seek(0, io.SeekStart)
 
+	// If CIDR range was provided, generate list of IPs from CIDR
+	if inputcidr != "" {
+		fmt.Print("Generating IP list from CIDR...")
+		validAddr, ip_list = generateIPRange(inputcidr)
+		fmt.Println("\nFound " + strconv.Itoa(validAddr) + " addresses to check")
+		_ = ip_list
+	}
 	// Create output files
 	allResults, err := os.Create(timestamp + "-ALL.csv")
 	if err != nil {
@@ -113,27 +154,18 @@ func main() {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			if vlog {
+				fmt.Println("Starting worker")
+			}
 			getWebPage(w, jobs, results)
 		}()
 	}
 
-	// Read each line of input file, and send to getWebPage
-	fmt.Println("Working...")
-	scanner := bufio.NewScanner(infile)
-	for scanner.Scan() {
-
-		// Strip any whitespace from IP
-		ip := strings.TrimSpace(scanner.Text())
-		// Ensure IP is valid
-		if net.ParseIP(strings.Split(ip, ":")[0]) == nil {
-			if vlog {
-				fmt.Println("Invalid address: ", ip)
-			}
-			continue
-		}
-		// Load into jobs queue
+	// Load IPs into job queue
+	for _, ip := range ip_list {
 		jobs <- ip
 	}
+
 	if vlog {
 		fmt.Println("All jobs loaded into queue!")
 	}
@@ -172,6 +204,14 @@ func main() {
 			temp := strings.Split(battery_status.temp, " degrees Celsius")[0]
 			// Convert to Float & check against provided threshold
 			if a, err := strconv.ParseFloat(temp, 64); a > chkTemp {
+				if err != nil {
+					continue
+				}
+				// Catch any IP phones that may have reported Good,
+				// but have high temp
+				if battery_status.health == "Good" {
+					_, err = badResults.WriteString(result_info)
+				}
 				if err != nil {
 					continue
 				}
@@ -282,4 +322,33 @@ func countLines(input *os.File) (int, int) {
 		}
 	}
 	return valid, invalid
+}
+
+// generateIPRange will generate a list of IP addresses based on a given CIDR subnet
+func generateIPRange(cidr string) (int, []string) {
+	// Create new slice & parse IP range
+	var ip_list []string
+	ip, ip_net, err := net.ParseCIDR(cidr)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Generate list of IP addresses in CIDR
+	for ip := ip.Mask(ip_net.Mask); ip_net.Contains(ip); inc(ip) {
+		ip_list = append(ip_list, ip.String())
+	}
+
+	// Return count of IP adresses & IP list
+	return len(ip_list), ip_list
+
+}
+
+// Increment IP address
+func inc(ip net.IP) {
+	for j := len(ip) - 1; j >= 0; j-- {
+		ip[j]++
+		if ip[j] > 0 {
+			break
+		}
+	}
 }
